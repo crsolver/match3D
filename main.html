@@ -1,0 +1,734 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>3D Match-3 Game</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: Arial, sans-serif;
+        }
+        canvas {
+            display: block;
+        }
+        #score {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            color: white;
+            font-size: 24px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+        }
+        #instructions {
+            position: absolute;
+            bottom: 20px;
+            left: 20px;
+            color: white;
+            font-size: 16px;
+            text-shadow: 2px 2px 4px rgba(0, 0, 0, 0.5);
+            display: flex;
+            flex-direction: column;
+        }
+    </style>
+</head>
+<body>
+    <div id="score">Score: 0</div>
+    <a target="_blank" href="https://jam.pieter.com" style="font-family: 'system-ui', sans-serif; position: fixed; bottom: -1px; right: -1px; padding: 7px; font-size: 14px; font-weight: bold; background: #fff; color: #000; text-decoration: none; z-index: 10; border-top-left-radius: 12px; z-index: 10000; border: 1px solid #fff;">🕹️ Vibe Jam 2025</a>
+
+    <div id="instructions">
+        <p>Click and drag to swap gems. Match 3 or more to score points.</p>
+        <a target="_blank" href="https://claude.ai/share/49f91fb4-1f12-4fc1-a2da-4a1ffca837dc">Claude chat</a>
+        <a href="https://github.com/crsolver/match3D.git">Code</a>
+    </div>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script>
+        // Game configuration
+        const config = {
+            boardSize: 8,
+            tileSize: 1,
+            spacing: 0.8,
+            gemTypes: 5,
+            rotationSpeed: 0.01,
+            animationSpeed: 0.1,
+            matchDelay: 300,
+            newGemsDelay: 500,
+            hoverRotationSpeed: 0.3,
+            rotationDamping: 0.95,
+            // Particle configuration
+            particlesPerGem: 15,
+            particleSize: 0.08,
+            particleLifetime: 1.0,
+            particleSpeed: 2.0
+        };
+
+        // Game state
+        const state = {
+            score: 0,
+            board: [],
+            selectedTile: null,
+            isAnimating: false,
+            matchFound: false,
+            hoveredGem: null,
+            particles: []
+        };
+
+        // Color palette for gems
+        const colors = [
+            0xff4136, // Red
+            0x2ecc40, // Green
+            0x0074d9, // Blue
+            0xffdc00, // Yellow
+            0xb10dc9  // Purple
+        ];
+
+        // Setup Three.js
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x000000);
+
+        // Define the viewport dimensions
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+
+        // For orthographic camera, we define the viewing volume with these parameters
+        const frustumSize = 10;
+        const aspect = width / height;
+        
+        const camera = new THREE.OrthographicCamera(
+            frustumSize * aspect / -2,  // left
+            frustumSize * aspect / 2,   // right
+            frustumSize / 2,            // top
+            frustumSize / -2,           // bottom
+            0.1,                        // near
+            1000                        // far
+        )
+        camera.position.z = 20;
+        camera.position.y = 0;
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        const canvas = renderer.domElement
+        document.body.appendChild(canvas);
+        
+        // Add lights
+        const ambientLight = new THREE.AmbientLight(0xffffff, 0.8);
+        scene.add(ambientLight);
+
+        const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+        directionalLight.position.set(0, 10, 7);
+        scene.add(directionalLight);
+        
+        const directionalLight2 = new THREE.DirectionalLight(0xffffff, 1);
+        directionalLight.position.set(0, 9, 10);
+        scene.add(directionalLight2);
+
+        // Create board container
+        const boardContainer = new THREE.Object3D();
+        scene.add(boardContainer);
+        
+        // Create particle container
+        const particleContainer = new THREE.Object3D();
+        scene.add(particleContainer);
+        
+        // Offset the board to center it
+        const boardOffset = (config.boardSize * config.spacing) / 2 - config.spacing / 2;
+        boardContainer.position.set(-boardOffset, -boardOffset, 0);
+
+        // Function to create a gem based on type
+        function createGem(type) {
+            const geometry = new THREE.OctahedronGeometry(0.3);
+            
+            const material = new THREE.MeshStandardMaterial({
+                color: colors[type],
+                roughness: 0.3,
+                metalness: 0.8
+            });
+            
+            const mesh = new THREE.Mesh(geometry, material);
+            const x = (Math.random() - 0.5) * config.hoverRotationSpeed;
+            const y = (Math.random() - 0.5) * config.hoverRotationSpeed;
+            const z = (Math.random() - 0.5) * config.hoverRotationSpeed;
+            mesh.userData = { 
+                type: type, 
+                isGem: true,
+                rotationVelocity: { x, y, z }
+            };
+            return mesh;
+        }
+        
+        // Function to create a particle
+        function createParticle(position, color) {
+            const geometry = new THREE.OctahedronGeometry(config.particleSize);
+            const material = new THREE.MeshStandardMaterial({
+                color: color,
+                roughness: 0.3,
+                metalness: 0.8,
+                opacity: 1.0
+            });
+            
+            const particle = new THREE.Mesh(geometry, material);
+            
+            // Set initial position
+            particle.position.copy(position);
+            
+            // Random velocity direction
+            const angle = Math.random() * Math.PI * 2;
+            const z = (Math.random() * 2) - 1;
+            const planarRadius = Math.sqrt(1 - z * z);
+            const x = planarRadius * Math.cos(angle);
+            const y = planarRadius * Math.sin(angle);
+            
+            // Final velocity with random speed
+            const speed = config.particleSpeed * (0.5 + Math.random() * 0.5);
+            particle.velocity = new THREE.Vector3(
+                x * speed,
+                y * speed,
+                z * speed
+            );
+            
+            // Random rotation
+            particle.rotationSpeed = {
+                x: (Math.random() - 0.5) * 0.2,
+                y: (Math.random() - 0.5) * 0.2,
+                z: (Math.random() - 0.5) * 0.2
+            };
+            
+            // Set lifetime
+            particle.lifetime = config.particleLifetime * (0.7 + Math.random() * 0.6);
+            particle.age = 0;
+            
+            particleContainer.add(particle);
+            state.particles.push(particle);
+            
+            return particle;
+        }
+        
+        // Create particles when a gem is matched
+        function createGemExplosion(position, gemType) {
+            const worldPosition = new THREE.Vector3();
+            worldPosition.copy(position);
+            boardContainer.localToWorld(worldPosition);
+            
+            for (let i = 0; i < config.particlesPerGem; i++) {
+                createParticle(worldPosition, colors[gemType]);
+            }
+        }
+        
+        // Update particles
+        function updateParticles(delta) {
+            for (let i = state.particles.length - 1; i >= 0; i--) {
+                const particle = state.particles[i];
+                
+                // Update age
+                particle.age += delta;
+                
+                // Remove if lifetime expired
+                if (particle.age >= particle.lifetime) {
+                    particleContainer.remove(particle);
+                    state.particles.splice(i, 1);
+                    continue;
+                }
+                
+                // Update position based on velocity
+                particle.position.x += particle.velocity.x * delta;
+                particle.position.y += particle.velocity.y * delta;
+                particle.position.z += particle.velocity.z * delta;
+                
+                // Add gravity effect
+                particle.velocity.y -= 2.0 * delta;
+                
+                // Update rotation
+                particle.rotation.x += particle.rotationSpeed.x;
+                particle.rotation.y += particle.rotationSpeed.y;
+                particle.rotation.z += particle.rotationSpeed.z;
+                
+                // Fade out based on lifetime
+                const lifeRatio = 1 - (particle.age / particle.lifetime);
+                particle.material.opacity = lifeRatio;
+                
+                // Scale down slightly over time
+                const scale = 1 - ((1 - lifeRatio) * 0.3);
+                particle.scale.set(scale, scale, scale);
+            }
+        }
+
+        // Initialize the game board
+        function initializeBoard() {
+            // Clear existing board
+            while(boardContainer.children.length > 0) {
+                boardContainer.remove(boardContainer.children[0]);
+            }
+            
+            state.board = [];
+            
+            // Create board array
+            for (let y = 0; y < config.boardSize; y++) {
+                state.board[y] = [];
+                for (let x = 0; x < config.boardSize; x++) {
+                    let gemType;
+                    
+                    // Avoid creating initial matches
+                    do {
+                        gemType = Math.floor(Math.random() * config.gemTypes);
+                    } while (
+                        // Check horizontal matches
+                        (x >= 2 && 
+                         state.board[y][x-1] && 
+                         state.board[y][x-2] && 
+                         state.board[y][x-1].userData.type === gemType && 
+                         state.board[y][x-2].userData.type === gemType) ||
+                        // Check vertical matches
+                        (y >= 2 && 
+                         state.board[y-1] && 
+                         state.board[y-2] && 
+                         state.board[y-1][x] && 
+                         state.board[y-2][x] && 
+                         state.board[y-1][x].userData.type === gemType && 
+                         state.board[y-2][x].userData.type === gemType)
+                    );
+                    
+                    const gem = createGem(gemType);
+                    gem.position.set(x * config.spacing, y * config.spacing, 0);
+                    boardContainer.add(gem);
+                    state.board[y][x] = gem;
+                }
+            }
+        }
+
+        // Handle mouse events
+        const raycaster = new THREE.Raycaster();
+        const mouse = new THREE.Vector2();
+ 
+        // Mouse move for gem hover effects
+        renderer.domElement.addEventListener('mousemove', (e) => {
+            // Calculate mouse position for raycasting
+            const rect = renderer.domElement.getBoundingClientRect();
+            mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+            mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+            
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(boardContainer.children);
+            
+            // Reset previously hovered gem
+            if (state.hoveredGem) {
+                state.hoveredGem.userData.isHovered = false;
+            }
+            
+            // Set new hovered gem
+            if (intersects.length > 0 && intersects[0].object.userData.isGem) {
+                const gem = intersects[0].object;
+                gem.userData.isHovered = true;
+                state.hoveredGem = gem;
+                canvas.style.cursor = "grab";
+                
+                // Add rotation velocity when hovered
+                gem.userData.rotationVelocity.x = (Math.random() - 0.5) * config.hoverRotationSpeed;
+                gem.userData.rotationVelocity.y = (Math.random() - 0.5) * config.hoverRotationSpeed;
+                gem.userData.rotationVelocity.z = (Math.random() - 0.5) * config.hoverRotationSpeed;
+            } else {
+                state.hoveredGem = null;
+                canvas.style.cursor = "auto";
+            }
+        });
+        
+        let isDragging = false;
+        let startTile = null;
+
+
+        function onMouseDown(event) {
+            if (state.isAnimating) return;
+            
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(boardContainer.children);
+            
+            if (intersects.length > 0 && intersects[0].object.userData.isGem) {
+                isDragging = true;
+                startTile = intersects[0].object;
+            }
+        }
+
+        function onMouseUp(event) {
+            if (!isDragging || state.isAnimating) {
+                isDragging = false;
+                startTile = null;
+                return;
+            }
+            
+            mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            
+            raycaster.setFromCamera(mouse, camera);
+            const intersects = raycaster.intersectObjects(boardContainer.children);
+            
+            if (intersects.length > 0 && intersects[0].object.userData.isGem) {
+                const endTile = intersects[0].object;
+                
+                // Find positions in the board
+                let startPos = { x: -1, y: -1 };
+                let endPos = { x: -1, y: -1 };
+                
+                for (let y = 0; y < config.boardSize; y++) {
+                    for (let x = 0; x < config.boardSize; x++) {
+                        if (state.board[y][x] === startTile) {
+                            startPos = { x, y };
+                        }
+                        if (state.board[y][x] === endTile) {
+                            endPos = { x, y };
+                        }
+                    }
+                }
+                
+                // Check if they are adjacent
+                const dx = Math.abs(startPos.x - endPos.x);
+                const dy = Math.abs(startPos.y - endPos.y);
+                
+                if ((dx === 1 && dy === 0) || (dx === 0 && dy === 1)) {
+                    swapTiles(startPos, endPos);
+                }
+            }
+            
+            isDragging = false;
+            startTile = null;
+        }
+
+        function swapTiles(pos1, pos2) {
+            state.isAnimating = true;
+            
+            const gem1 = state.board[pos1.y][pos1.x];
+            const gem2 = state.board[pos2.y][pos2.x];
+            
+            // Swap in the board array
+            state.board[pos1.y][pos1.x] = gem2;
+            state.board[pos2.y][pos2.x] = gem1;
+            
+            // Animate the swap
+            const targetPos1 = { 
+                x: pos2.x * config.spacing, 
+                y: pos2.y * config.spacing 
+            };
+            const targetPos2 = { 
+                x: pos1.x * config.spacing, 
+                y: pos1.y * config.spacing 
+            };
+            
+            animateSwap(gem1, targetPos1, gem2, targetPos2, () => {
+                checkForMatches(true);
+            });
+        }
+
+        function animateSwap(gem1, targetPos1, gem2, targetPos2, callback) {
+            const startPos1 = { x: gem1.position.x, y: gem1.position.y };
+            const startPos2 = { x: gem2.position.x, y: gem2.position.y };
+            
+            let progress = 0;
+            
+            function animate() {
+                progress += config.animationSpeed;
+                
+                if (progress >= 1) {
+                    gem1.position.x = targetPos1.x;
+                    gem1.position.y = targetPos1.y;
+                    gem2.position.x = targetPos2.x;
+                    gem2.position.y = targetPos2.y;
+                    callback();
+                    return;
+                }
+                
+                // Ease in-out function
+                const eased = progress < 0.5 
+                    ? 2 * progress * progress 
+                    : 1 - Math.pow(-2 * progress + 2, 2) / 2;
+                
+                gem1.position.x = startPos1.x + (targetPos1.x - startPos1.x) * eased;
+                gem1.position.y = startPos1.y + (targetPos1.y - startPos1.y) * eased;
+                gem2.position.x = startPos2.x + (targetPos2.x - startPos2.x) * eased;
+                gem2.position.y = startPos2.y + (targetPos2.y - startPos2.y) * eased;
+                
+                requestAnimationFrame(animate);
+            }
+            
+            animate();
+        }
+
+        function checkForMatches(shouldSwapBack) {
+            const matches = findMatches();
+            
+            if (matches.length > 0) {
+                state.matchFound = true;
+                
+                // Remove matched gems
+                setTimeout(() => {
+                    removeMatches(matches);
+                    
+                    // Add new gems
+                    setTimeout(() => {
+                        addNewGems();
+                        
+                        // Check for cascading matches
+                        setTimeout(() => {
+                            checkForMatches(false);
+                        }, config.matchDelay);
+                    }, config.newGemsDelay);
+                }, config.matchDelay);
+            } else {
+                if (shouldSwapBack && !state.matchFound) {
+                    // Swap back if no matches were found
+                    state.isAnimating = false;
+                    // Find the last swapped tiles
+                    let lastSwap = null;
+                    for (let y = 0; y < config.boardSize; y++) {
+                        for (let x = 0; x < config.boardSize; x++) {
+                            if (Math.abs(state.board[y][x].position.x - x * config.spacing) > 0.1 ||
+                                Math.abs(state.board[y][x].position.y - y * config.spacing) > 0.1) {
+                                // Found a gem that's not in its correct position
+                                if (!lastSwap) {
+                                    lastSwap = { pos1: { x, y }, gem1: state.board[y][x] };
+                                } else {
+                                    lastSwap.pos2 = { x, y };
+                                    lastSwap.gem2 = state.board[y][x];
+                                    break;
+                                }
+                            }
+                        }
+                        if (lastSwap && lastSwap.pos2) break;
+                    }
+                    
+                    if (lastSwap && lastSwap.pos2) {
+                        swapTiles(lastSwap.pos1, lastSwap.pos2);
+                    }
+                } else {
+                    state.isAnimating = false;
+                    state.matchFound = false;
+                }
+            }
+        }
+
+        function findMatches() {
+            const matches = [];
+            
+            // Check horizontal matches
+            for (let y = 0; y < config.boardSize; y++) {
+                let matchLength = 1;
+                let matchType = null;
+                
+                for (let x = 0; x < config.boardSize; x++) {
+                    const currentType = state.board[y][x].userData.type;
+                    
+                    if (x > 0 && currentType === matchType) {
+                        matchLength++;
+                    } else {
+                        if (matchLength >= 3) {
+                            // Found a match
+                            for (let i = x - matchLength; i < x; i++) {
+                                matches.push({ x: i, y: y });
+                            }
+                        }
+                        matchLength = 1;
+                        matchType = currentType;
+                    }
+                }
+                
+                // Check for match at the end of row
+                if (matchLength >= 3) {
+                    for (let i = config.boardSize - matchLength; i < config.boardSize; i++) {
+                        matches.push({ x: i, y: y });
+                    }
+                }
+            }
+            
+            // Check vertical matches
+            for (let x = 0; x < config.boardSize; x++) {
+                let matchLength = 1;
+                let matchType = null;
+                
+                for (let y = 0; y < config.boardSize; y++) {
+                    const currentType = state.board[y][x].userData.type;
+                    
+                    if (y > 0 && currentType === matchType) {
+                        matchLength++;
+                    } else {
+                        if (matchLength >= 3) {
+                            // Found a match
+                            for (let i = y - matchLength; i < y; i++) {
+                                matches.push({ x: x, y: i });
+                            }
+                        }
+                        matchLength = 1;
+                        matchType = currentType;
+                    }
+                }
+                
+                // Check for match at the end of column
+                if (matchLength >= 3) {
+                    for (let i = config.boardSize - matchLength; i < config.boardSize; i++) {
+                        matches.push({ x: x, y: i });
+                    }
+                }
+            }
+            
+            // Remove duplicates
+            const uniqueMatches = [];
+            matches.forEach(match => {
+                if (!uniqueMatches.some(m => m.x === match.x && m.y === match.y)) {
+                    uniqueMatches.push(match);
+                }
+            });
+            
+            return uniqueMatches;
+        }
+
+        function removeMatches(matches) {
+            // Update score
+            state.score += matches.length * 10;
+            document.getElementById('score').textContent = `Score: ${state.score}`;
+            
+            // Remove matched gems and create particle effects
+            matches.forEach(match => {
+                const gem = state.board[match.y][match.x];
+                const gemType = gem.userData.type;
+                const gemPosition = gem.position.clone();
+                
+                // Create particle explosion at gem position
+                createGemExplosion(gemPosition, gemType);
+                
+                // Remove gem
+                boardContainer.remove(gem);
+                state.board[match.y][match.x] = null;
+            });
+        }
+
+        function addNewGems() {
+            // Move gems down to fill gaps
+            for (let x = 0; x < config.boardSize; x++) {
+                // Count empty spaces in each column
+                let emptyCount = 0;
+                
+                for (let y = 0; y < config.boardSize; y++) {
+                    if (state.board[y][x] === null) {
+                        emptyCount++;
+                    } else if (emptyCount > 0) {
+                        // Move gem down
+                        const gem = state.board[y][x];
+                        state.board[y-emptyCount][x] = gem;
+                        state.board[y][x] = null;
+                        
+                        // Animate the gem moving down
+                        const targetY = (y - emptyCount) * config.spacing;
+                        animateGemFall(gem, targetY);
+                    }
+                }
+                
+                // Create new gems at the top
+                for (let y = config.boardSize - emptyCount; y < config.boardSize; y++) {
+                    const gemType = Math.floor(Math.random() * config.gemTypes);
+                    const gem = createGem(gemType);
+                    
+                    // Position above the board
+                    gem.position.set(
+                        x * config.spacing, 
+                        (y + emptyCount) * config.spacing, 
+                        0
+                    );
+                    
+                    boardContainer.add(gem);
+                    state.board[y][x] = gem;
+                    
+                    // Animate falling
+                    animateGemFall(gem, y * config.spacing);
+                }
+            }
+        }
+
+        function animateGemFall(gem, targetY) {
+            const startY = gem.position.y;
+            let progress = 0;
+            
+            function animate() {
+                progress += config.animationSpeed;
+                
+                if (progress >= 1) {
+                    gem.position.y = targetY;
+                    return;
+                }
+                
+                // Ease in function (accelerating)
+                const eased = progress * progress;
+                gem.position.y = startY + (targetY - startY) * eased;
+                
+                requestAnimationFrame(animate);
+            }
+            
+            animate();
+        }
+
+        // Handle window resize
+        function onWindowResize() {
+            const width = window.innerWidth;
+            const height = window.innerHeight;
+            const aspect = width / height;
+            
+            // Update orthographic camera
+            camera.left = frustumSize * aspect / -2;
+            camera.right = frustumSize * aspect / 2;
+            camera.top = frustumSize / 2;
+            camera.bottom = frustumSize / -2;
+            camera.updateProjectionMatrix();
+            
+            renderer.setSize(width, height);
+        }
+
+        const clock = new THREE.Clock();
+        let lastTime = 0;
+
+        // Animation loop
+        function animate() {
+            requestAnimationFrame(animate);
+            const elapsedTime = clock.getElapsedTime();
+            const deltaTime = elapsedTime - lastTime;
+            lastTime = elapsedTime;
+            
+            // Update lighting effects
+            directionalLight2.position.x = Math.sin(elapsedTime * 0.9) * 5;
+            directionalLight2.position.y = Math.sin(elapsedTime * 0.5) * 5;
+
+            // Update gems
+            boardContainer.children.forEach(gem => {
+                const sin = Math.sin(elapsedTime) * 0.003;
+                const sin2 = Math.sin(elapsedTime) * 0.001;
+                gem.position.y += Math.random() * sin2; 
+                gem.rotation.z += Math.random() * sin; 
+                gem.rotation.x += Math.random() * sin; 
+                if (gem.userData && gem.userData.rotationVelocity) {
+                    // Apply damping to slow down rotation over time
+                    gem.userData.rotationVelocity.x *= config.rotationDamping;
+                    gem.userData.rotationVelocity.y *= config.rotationDamping;
+                    gem.userData.rotationVelocity.z *= config.rotationDamping;
+                    
+                    // Apply rotation
+                    gem.rotation.x += gem.userData.rotationVelocity.x;
+                    gem.rotation.y += gem.userData.rotationVelocity.y;
+                    gem.rotation.z += gem.userData.rotationVelocity.z;
+                }
+            });
+            
+            // Update particles
+            updateParticles(deltaTime);
+            
+            renderer.render(scene, camera);
+        }
+
+        // Initialize game
+        initializeBoard();
+        animate();
+
+        // Event listeners
+        window.addEventListener('mousedown', onMouseDown);
+        window.addEventListener('mouseup', onMouseUp);
+        window.addEventListener('resize', onWindowResize);
+    </script>
+</body>
+</html>
